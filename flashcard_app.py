@@ -14,44 +14,34 @@ FLASHCARDS_FILE = "flashcards.json"
 class FlashcardApp:
     def __init__(self, master):
         self.master = master
-        self.master.title("Flashcard Study App - Two Tabs")
+        self.master.title("Flashcard Study App - Two Tabs (Multiple Images)")
         self.master.geometry("900x550")
         self.master.config(bg="#F5F5F5")
 
         # ------------------------------------------------
         # Internal Data
         # ------------------------------------------------
-        # Dictionary of courses -> list of flashcards
-        # Each flashcard: {
-        #   "question": str,
-        #   "answer": str,
-        #   "question_img": path_or_None,
-        #   "answer_img": path_or_None
-        # }
-        self.courses = self.load_courses()
-
-        # Current selected course
+        self.courses = self.load_courses()  # { courseName: [ { "question":..., "answer":..., "question_imgs":[], "answer_imgs":[]} ] }
         self.current_course = None
 
-        # We store the current flashcard's index in self.courses[self.current_course].
-        # If None, no card is selected yet.
+        # Store the current flashcard's index in self.courses[self.current_course].
         self.current_flashcard_index = None
 
         # For random deck usage without repeats:
-        # self.shuffle_bags[course_name] = list of card indices to draw from
         self.shuffle_bags = {}
-
-        # Counters for how many are in the deck and how many we've seen
         self.current_deck_count = 0
         self.current_deck_seen = 0
 
-        # Temporary file paths for new question/answer images in the "Create" tab
-        self.new_question_img_path = None
-        self.new_answer_img_path = None
+        # For storing new images in the "create" tab
+        self.new_question_img_paths = []
+        self.new_answer_img_paths = []
+        # We'll keep references to the preview image objects to avoid GC
+        self.new_question_img_objs = []
+        self.new_answer_img_objs = []
 
-        # Keep references to displayed images so Python doesn't garbage-collect them
-        self.question_img_obj = None
-        self.answer_img_obj = None
+        # We'll keep references to displayed images in the study tab
+        self.question_img_objs_study = []
+        self.answer_img_objs_study = []
 
         # ------------------------------------------------
         # Build the UI (Notebook with 2 tabs)
@@ -59,19 +49,17 @@ class FlashcardApp:
         self.notebook = ttk.Notebook(self.master)
         self.notebook.pack(fill="both", expand=True)
 
-        # Two frames (tabs)
         self.tab_create_manage = ttk.Frame(self.notebook)
         self.tab_study = ttk.Frame(self.notebook)
 
         self.notebook.add(self.tab_create_manage, text="Create & Manage")
         self.notebook.add(self.tab_study, text="Study")
 
-        # Build each tab’s content
         self.build_create_manage_tab()
         self.build_study_tab()
 
     # ================================================================
-    # Build Tab 1: Create & Manage Flashcards
+    # Build Tab 1: Create & Manage
     # ================================================================
     def build_create_manage_tab(self):
         tab = self.tab_create_manage
@@ -86,13 +74,13 @@ class FlashcardApp:
         )
         course_frame.pack(side="left", fill="y", padx=10, pady=10)
 
-        # Add Course
         tk.Label(
             course_frame,
             text="Add a new course:",
             bg="#FFFFFF",
             font=("Helvetica", 20)
         ).pack(pady=(10,0))
+
         self.new_course_entry = tk.Entry(course_frame, font=("Helvetica", 20))
         self.new_course_entry.pack(pady=5)
 
@@ -106,13 +94,13 @@ class FlashcardApp:
 
         ttk.Separator(course_frame, orient="horizontal").pack(fill="x", pady=10)
 
-        # Existing course dropdown
         tk.Label(
             course_frame,
             text="Select a course to manage:",
             bg="#FFFFFF",
             font=("Helvetica", 20)
         ).pack(pady=(5,0))
+
         self.manage_course_var = tk.StringVar()
         self.manage_course_dropdown = ttk.Combobox(
             course_frame,
@@ -124,15 +112,7 @@ class FlashcardApp:
         self.update_course_dropdown()
         self.manage_course_dropdown.bind("<<ComboboxSelected>>", self.on_manage_course_selected)
 
-        # # The disabled "Save All Courses to Disk" button
-        # save_all_button = tk.Button(
-        #     course_frame,
-        #     text="Save All Courses to Disk",
-        #     font=("Helvetica", 20),
-        #     command=self.save_courses_to_disk,
-        #     state="disabled"  # <--- Disabled button
-        # )
-        # save_all_button.pack(pady=20)
+        # (Optional) Disabled 'Save All Courses' button code removed for brevity.
 
         # -- Middle: Create Flashcard --
         create_frame = tk.LabelFrame(
@@ -147,7 +127,10 @@ class FlashcardApp:
         self.question_entry = tk.Text(create_frame, height=3, width=35, wrap="word", font=("Helvetica", 20))
         self.question_entry.pack(pady=5)
 
-        # Attach question image
+        # Frame to preview question images
+        self.question_preview_frame = tk.Frame(create_frame, bg="#FFFFFF")
+        self.question_preview_frame.pack(pady=5)
+
         tk.Button(
             create_frame,
             text="Attach Question Image",
@@ -159,7 +142,10 @@ class FlashcardApp:
         self.answer_entry = tk.Text(create_frame, height=3, width=35, wrap="word", font=("Helvetica", 20))
         self.answer_entry.pack(pady=5)
 
-        # Attach answer image
+        # Frame to preview answer images
+        self.answer_preview_frame = tk.Frame(create_frame, bg="#FFFFFF")
+        self.answer_preview_frame.pack(pady=5)
+
         tk.Button(
             create_frame,
             text="Attach Answer Image",
@@ -179,7 +165,6 @@ class FlashcardApp:
         ).pack(pady=10)
 
     def on_manage_course_selected(self, event=None):
-        """When user selects a course in the 'manage' dropdown."""
         selected_course = self.manage_course_var.get()
         if selected_course in self.courses:
             self.current_course = selected_course
@@ -187,13 +172,12 @@ class FlashcardApp:
             self.current_course = None
 
     # ================================================================
-    # Build Tab 2: Study Flashcards
+    # Build Tab 2: Study
     # ================================================================
     def build_study_tab(self):
         tab = self.tab_study
         tab.config(width=900, height=550)
 
-        # -- Top bar: select course to study --
         study_top_frame = tk.Frame(tab, bg="#F5F5F5")
         study_top_frame.pack(side="top", fill="x", padx=10, pady=(10, 0))
 
@@ -215,11 +199,9 @@ class FlashcardApp:
         self.update_course_dropdown_study()
         self.study_course_dropdown.bind("<<ComboboxSelected>>", self.on_study_course_selected)
 
-        # -- Main study area --
         study_main_frame = tk.Frame(tab, bg="#FFFFFF", bd=2, relief="groove")
         study_main_frame.pack(side="top", fill="both", expand=True, padx=10, pady=10)
 
-        # Question text
         self.question_label_study = tk.Label(
             study_main_frame,
             text="(No course selected)",
@@ -230,7 +212,6 @@ class FlashcardApp:
         )
         self.question_label_study.pack(pady=(10, 0))
 
-        # Counter label
         self.counter_label_study = tk.Label(
             study_main_frame,
             text="",
@@ -240,18 +221,16 @@ class FlashcardApp:
         )
         self.counter_label_study.pack(pady=(0,10))
 
-        # Question Image (below question text)
-        self.question_img_label = tk.Label(study_main_frame, bg="#FFFFFF")
-        self.question_img_label.pack(pady=5)
+        # Frame for question images
+        self.question_images_frame_study = tk.Frame(study_main_frame, bg="#FFFFFF")
+        self.question_images_frame_study.pack(pady=5)
 
-        # Answer area
         answer_frame = tk.Frame(study_main_frame, bg="#FFFFFF")
         answer_frame.pack(fill="both", expand=True, pady=5)
 
         self.answer_scrollbar = tk.Scrollbar(answer_frame, orient="vertical")
         self.answer_scrollbar.pack(side="right", fill="y")
 
-        # -- The key change: height=10 --
         self.answer_text_study = tk.Text(
             answer_frame,
             font=("Helvetica", 20),
@@ -259,19 +238,17 @@ class FlashcardApp:
             yscrollcommand=self.answer_scrollbar.set,
             bg="#FFFFFF",
             fg="#333",
-            height=10,  # Increased from 5 to 10
+            height=10,
             width=40
         )
         self.answer_text_study.pack(side="left", fill="both", expand=True)
-
         self.answer_scrollbar.config(command=self.answer_text_study.yview)
         self.answer_text_study.config(state="disabled")
 
-        # Answer Image (below the answer text)
-        self.answer_img_label = tk.Label(answer_frame, bg="#FFFFFF")
-        self.answer_img_label.pack(pady=(5, 0))
+        # Frame for answer images
+        self.answer_images_frame_study = tk.Frame(answer_frame, bg="#FFFFFF")
+        self.answer_images_frame_study.pack(side="left", fill="both", expand=True, pady=5)
 
-        # Bottom buttons
         study_button_frame = tk.Frame(study_main_frame, bg="#FFFFFF")
         study_button_frame.pack(pady=5)
 
@@ -304,13 +281,12 @@ class FlashcardApp:
         ).pack(side="left", padx=5)
 
     def on_study_course_selected(self, event=None):
-        """When user picks a course to study in Tab 2."""
         selected_course = self.study_course_var.get()
         if selected_course in self.courses:
             self.current_course = selected_course
             self.question_label_study.config(text="Ready to study!")
             self.clear_answer_display()
-            self.question_img_label.config(image="", text="")
+            self.clear_question_images_study()
             self.shuffle_bags[selected_course] = []
             self.current_deck_count = 0
             self.current_deck_seen = 0
@@ -320,12 +296,12 @@ class FlashcardApp:
             self.current_course = None
             self.question_label_study.config(text="(No course selected)")
             self.clear_answer_display()
-            self.question_img_label.config(image="", text="")
+            self.clear_question_images_study()
             self.counter_label_study.config(text="")
             self.current_flashcard_index = None
 
     # ================================================================
-    # Data: Loading & Saving
+    # Data Loading / Saving
     # ================================================================
     def load_courses(self):
         if os.path.exists(FLASHCARDS_FILE):
@@ -334,16 +310,14 @@ class FlashcardApp:
         return {}
 
     def save_courses_to_disk(self):
-        """This function remains, but the button is disabled."""
+        """No pop-up message here."""
         with open(FLASHCARDS_FILE, "w", encoding="utf-8") as f:
             json.dump(self.courses, f, indent=4)
-        # messagebox.showinfo("Success", "All courses saved to disk.")
 
     # ================================================================
     # Updating ComboBoxes
     # ================================================================
     def update_course_dropdown(self):
-        """Refresh the 'manage' dropdown in Tab 1 with current courses."""
         course_names = list(self.courses.keys())
         self.manage_course_dropdown["values"] = course_names
         if self.current_course in course_names:
@@ -352,7 +326,6 @@ class FlashcardApp:
             self.manage_course_var.set("")
 
     def update_course_dropdown_study(self):
-        """Refresh the 'study' dropdown in Tab 2 with current courses."""
         course_names = list(self.courses.keys())
         self.study_course_dropdown["values"] = course_names
         if self.current_course in course_names:
@@ -378,10 +351,8 @@ class FlashcardApp:
             messagebox.showinfo("Info", f"Course '{new_course_name}' already exists.")
             self.new_course_entry.delete(0, tk.END)
 
-        # Update both dropdowns
         self.update_course_dropdown()
         self.update_course_dropdown_study()
-        # Create or reset shuffle bag
         self.shuffle_bags[new_course_name] = []
 
         self.save_courses_to_disk()
@@ -392,8 +363,8 @@ class FlashcardApp:
             filetypes=[("Image Files", "*.png;*.jpg;*.jpeg;*.gif;*.bmp")]
         )
         if file_path:
-            self.new_question_img_path = file_path
-            messagebox.showinfo("Image Selected", f"Question image attached:\n{file_path}")
+            self.new_question_img_paths.append(file_path)
+            self.show_question_image_preview(file_path)
 
     def select_answer_image(self):
         file_path = filedialog.askopenfilename(
@@ -401,11 +372,34 @@ class FlashcardApp:
             filetypes=[("Image Files", "*.png;*.jpg;*.jpeg;*.gif;*.bmp")]
         )
         if file_path:
-            self.new_answer_img_path = file_path
-            messagebox.showinfo("Image Selected", f"Answer image attached:\n{file_path}")
+            self.new_answer_img_paths.append(file_path)
+            self.show_answer_image_preview(file_path)
+
+    def show_question_image_preview(self, path):
+        """Display a small thumbnail in the question_preview_frame."""
+        try:
+            img = Image.open(path)
+            img.thumbnail((100, 100), Resampling.LANCZOS)
+            img_obj = ImageTk.PhotoImage(img)
+            self.new_question_img_objs.append(img_obj)
+            lbl = tk.Label(self.question_preview_frame, image=img_obj, bg="#FFFFFF")
+            lbl.pack(side="top", anchor="center", pady=2)
+        except:
+            pass
+
+    def show_answer_image_preview(self, path):
+        """Display a small thumbnail in the answer_preview_frame."""
+        try:
+            img = Image.open(path)
+            img.thumbnail((100, 100), Resampling.LANCZOS)
+            img_obj = ImageTk.PhotoImage(img)
+            self.new_answer_img_objs.append(img_obj)
+            lbl = tk.Label(self.answer_preview_frame, image=img_obj, bg="#FFFFFF")
+            lbl.pack(side="top", anchor="center", pady=2)
+        except:
+            pass
 
     def save_new_flashcard(self):
-        """Save a newly created flashcard to the chosen course."""
         if not self.current_course:
             messagebox.showwarning("Warning", "Please select a course first.")
             return
@@ -413,33 +407,43 @@ class FlashcardApp:
         question_text = self.question_entry.get("1.0", tk.END).strip()
         answer_text = self.answer_entry.get("1.0", tk.END).strip()
 
-        if not question_text and not answer_text and not self.new_question_img_path and not self.new_answer_img_path:
-            messagebox.showwarning("Warning", "Please enter a question/answer or attach an image.")
+        if not question_text and not answer_text and not self.new_question_img_paths and not self.new_answer_img_paths:
+            messagebox.showwarning("Warning", "Please enter text or attach images.")
             return
 
         new_flashcard = {
             "question": question_text,
             "answer": answer_text,
-            "question_img": self.new_question_img_path if self.new_question_img_path else None,
-            "answer_img": self.new_answer_img_path if self.new_answer_img_path else None
+            "question_imgs": list(self.new_question_img_paths),
+            "answer_imgs": list(self.new_answer_img_paths)
         }
         self.courses[self.current_course].append(new_flashcard)
 
-        # Clear fields
+        # Clear text fields
         self.question_entry.delete("1.0", tk.END)
         self.answer_entry.delete("1.0", tk.END)
-        self.new_question_img_path = None
-        self.new_answer_img_path = None
 
-        # Reset the shuffle bag
+        # Clear image lists
+        self.new_question_img_paths.clear()
+        self.new_answer_img_paths.clear()
+
+        # Clear preview frames
+        for widget in self.question_preview_frame.winfo_children():
+            widget.destroy()
+        for widget in self.answer_preview_frame.winfo_children():
+            widget.destroy()
+
+        self.new_question_img_objs.clear()
+        self.new_answer_img_objs.clear()
+
+        # Reset shuffle bag
         self.shuffle_bags[self.current_course] = []
 
-        # Save
         self.save_courses_to_disk()
         messagebox.showinfo("Success", f"Flashcard saved to course '{self.current_course}'!")
 
     # ================================================================
-    # Studying (Tab 2) with INDEX-based approach
+    # Studying with INDEX-based approach
     # ================================================================
     def next_card(self):
         if not self.current_course or self.current_course not in self.courses:
@@ -450,37 +454,34 @@ class FlashcardApp:
         if not flashcards:
             self.question_label_study.config(text="No flashcards in this course yet.")
             self.clear_answer_display()
+            self.clear_question_images_study()
             self.counter_label_study.config(text="")
-            self.question_img_label.config(image="", text="")
             self.current_flashcard_index = None
             return
 
-        # Build or reuse a shuffle bag of *indices*
+        # Build or reuse a shuffle bag of indices
         if self.current_course not in self.shuffle_bags:
             self.shuffle_bags[self.current_course] = []
 
         if len(self.shuffle_bags[self.current_course]) == 0:
-            new_bag = list(range(len(flashcards)))  # store indices (0..N-1)
+            new_bag = list(range(len(flashcards)))
             random.shuffle(new_bag)
             self.shuffle_bags[self.current_course] = new_bag
             self.current_deck_count = len(new_bag)
             self.current_deck_seen = 0
 
-        # Pop an index from the bag
         self.current_flashcard_index = self.shuffle_bags[self.current_course].pop()
         self.current_deck_seen += 1
 
-        # Retrieve the flashcard dict
         card_data = flashcards[self.current_flashcard_index]
 
-        # Display question text
+        # Show question text
         self.question_label_study.config(
             text=card_data.get("question") or "[No question text]"
         )
-        # Display question image (below text)
-        self.show_question_image(card_data.get("question_img"))
+        # Show question images
+        self.display_question_images_study(card_data.get("question_imgs", []))
 
-        # Clear answer
         self.clear_answer_display()
 
         # Update counter
@@ -501,14 +502,15 @@ class FlashcardApp:
         card_data = flashcards[self.current_flashcard_index]
         answer_text = card_data.get("answer") or "[No answer text]"
 
+        # Insert text (do NOT remove it afterwards!)
         self.answer_text_study.config(state="normal")
         self.answer_text_study.delete("1.0", tk.END)
         self.answer_text_study.insert(tk.END, answer_text)
         self.answer_text_study.config(state="disabled")
 
-        # Display answer image
-        answer_img = card_data.get("answer_img")
-        self.show_answer_image(answer_img)
+        # Display answer images
+        # => Note: we do NOT call clear_answer_display again here.
+        self.display_answer_images_study(card_data.get("answer_imgs", []))
 
     def delete_current_flashcard(self):
         if not self.current_course or self.current_course not in self.courses:
@@ -519,22 +521,19 @@ class FlashcardApp:
             return
 
         flashcards = self.courses[self.current_course]
-        # Check that index is valid
         if self.current_flashcard_index < 0 or self.current_flashcard_index >= len(flashcards):
             messagebox.showinfo("Info", "No valid flashcard is selected.")
             return
 
-        # Remove that flashcard
         flashcards.pop(self.current_flashcard_index)
         self.save_courses_to_disk()
 
         self.shuffle_bags[self.current_course] = []
         self.current_flashcard_index = None
 
-        # Reset
         self.question_label_study.config(text="Flashcard deleted. Click 'Next Card' to continue.")
         self.clear_answer_display()
-        self.question_img_label.config(image="", text="")
+        self.clear_question_images_study()
         self.counter_label_study.config(text="")
 
         messagebox.showinfo("Success", "The current flashcard has been deleted.")
@@ -552,10 +551,9 @@ class FlashcardApp:
             messagebox.showinfo("Info", "No valid flashcard selected.")
             return
 
-        # This is the flashcard dictionary
         card_data = flashcards[self.current_flashcard_index]
 
-        # Popup for editing
+        # Popup
         edit_window = tk.Toplevel(self.master)
         edit_window.title("Edit Flashcard")
         edit_window.geometry("500x400")
@@ -566,33 +564,34 @@ class FlashcardApp:
         edit_question_text.pack(pady=5)
         edit_question_text.insert(tk.END, card_data.get("question", ""))
 
-        # Let user change question image
-        new_qimg = [card_data.get("question_img", None)]
-        def change_qimg():
+        question_imgs = list(card_data.get("question_imgs", []))
+        def add_qimg():
             file_path = filedialog.askopenfilename(
                 title="Select New Question Image",
                 filetypes=[("Image Files", "*.png;*.jpg;*.jpeg;*.gif;*.bmp")]
             )
             if file_path:
-                new_qimg[0] = file_path
+                question_imgs.append(file_path)
                 messagebox.showinfo("Image Attached", f"New question image:\n{file_path}")
-        tk.Button(edit_window, text="Change Question Image", font=("Helvetica", 20), command=change_qimg).pack(pady=2)
+
+        tk.Button(edit_window, text="Add Question Image", font=("Helvetica", 20), command=add_qimg).pack(pady=2)
 
         tk.Label(edit_window, text="Edit Answer:", bg="#F5F5F5", font=("Helvetica", 20)).pack(pady=(10,0))
         edit_answer_text = tk.Text(edit_window, height=3, width=40, wrap="word", font=("Helvetica", 20))
         edit_answer_text.pack(pady=5)
         edit_answer_text.insert(tk.END, card_data.get("answer", ""))
 
-        new_aimg = [card_data.get("answer_img", None)]
-        def change_aimg():
+        answer_imgs = list(card_data.get("answer_imgs", []))
+        def add_aimg():
             file_path = filedialog.askopenfilename(
                 title="Select New Answer Image",
                 filetypes=[("Image Files", "*.png;*.jpg;*.jpeg;*.gif;*.bmp")]
             )
             if file_path:
-                new_aimg[0] = file_path
+                answer_imgs.append(file_path)
                 messagebox.showinfo("Image Attached", f"New answer image:\n{file_path}")
-        tk.Button(edit_window, text="Change Answer Image", font=("Helvetica", 20), command=change_aimg).pack(pady=2)
+
+        tk.Button(edit_window, text="Add Answer Image", font=("Helvetica", 20), command=add_aimg).pack(pady=2)
 
         edit_question_text.bind("<Control-BackSpace>", self.ctrl_backspace_handler)
         edit_answer_text.bind("<Control-BackSpace>", self.ctrl_backspace_handler)
@@ -601,23 +600,21 @@ class FlashcardApp:
             updated_question = edit_question_text.get("1.0", tk.END).strip()
             updated_answer = edit_answer_text.get("1.0", tk.END).strip()
 
-            # Both images stored in new_qimg[0], new_aimg[0]
-            if not (updated_question or updated_answer or new_qimg[0] or new_aimg[0]):
+            if not (updated_question or updated_answer or question_imgs or answer_imgs):
                 messagebox.showwarning("Warning", "Flashcard can't be entirely empty.")
                 return
 
             card_data["question"] = updated_question
             card_data["answer"] = updated_answer
-            card_data["question_img"] = new_qimg[0]
-            card_data["answer_img"]   = new_aimg[0]
+            card_data["question_imgs"] = question_imgs
+            card_data["answer_imgs"]   = answer_imgs
 
             self.save_courses_to_disk()
-            # Reset shuffle so next_card can reflect changes
             self.shuffle_bags[self.current_course] = []
 
-            # If it's the current card, update UI
+            # Update the UI if it's the current card
             self.question_label_study.config(text=updated_question or "[No question text]")
-            self.show_question_image(new_qimg[0])
+            self.display_question_images_study(question_imgs)
             self.clear_answer_display()
 
             messagebox.showinfo("Success", "Flashcard updated!")
@@ -626,47 +623,75 @@ class FlashcardApp:
         tk.Button(edit_window, text="Save Changes", font=("Helvetica", 20), command=save_changes).pack(pady=15)
 
     # ================================================================
-    # Utility / Image Display
+    # Utility: Study Tab Image Display
     # ================================================================
-    def show_question_image(self, path):
-        """Display question image below the question text."""
-        if path and os.path.exists(path):
-            try:
-                img = Image.open(path)
-                # Use Resampling.LANCZOS if available (Pillow>=9.1)
-                img.thumbnail((400, 400), Resampling.LANCZOS)
-                self.question_img_obj = ImageTk.PhotoImage(img)
-                self.question_img_label.config(image=self.question_img_obj, text="")
-            except Exception:
-                self.question_img_label.config(image="", text="(Error loading image)")
-        else:
-            self.question_img_label.config(image="", text="")
-            self.question_img_obj = None
+    def clear_question_images_study(self):
+        """Remove all question image labels from the study frame."""
+        for child in self.question_images_frame_study.winfo_children():
+            child.destroy()
+        self.question_img_objs_study.clear()
 
-    def show_answer_image(self, path):
-        """Display answer image below the answer text."""
-        if path and os.path.exists(path):
-            try:
-                img = Image.open(path)
-                img.thumbnail((400, 400), Resampling.LANCZOS)
-                self.answer_img_obj = ImageTk.PhotoImage(img)
-                self.answer_img_label.config(image=self.answer_img_obj, text="")
-            except Exception:
-                self.answer_img_label.config(image="", text="(Error loading image)")
-        else:
-            self.answer_img_label.config(image="", text="")
-            self.answer_img_obj = None
+    def display_question_images_study(self, paths):
+        """Display question images in a vertical column, centered."""
+        # 1) Clear old question images
+        self.clear_question_images_study()
+        # 2) Insert new images
+        for p in paths:
+            if os.path.exists(p):
+                try:
+                    img = Image.open(p)
+                    img.thumbnail((400, 400), Resampling.LANCZOS)
+                    img_obj = ImageTk.PhotoImage(img)
+                    self.question_img_objs_study.append(img_obj)
+                    lbl = tk.Label(self.question_images_frame_study, image=img_obj, bg="#FFFFFF")
+                    lbl.pack(side="top", anchor="center", pady=5)
+                except:
+                    lbl = tk.Label(self.question_images_frame_study, text="(Error loading image)", bg="#FFFFFF")
+                    lbl.pack(side="top", anchor="center", pady=5)
 
     def clear_answer_display(self):
-        """Clears both the answer text and the answer image."""
+        """
+        Clears both the answer text and the *old* answer images.
+        We'll call this before showing a *new* card.
+        In show_answer(), we do NOT re-clear after inserting text.
+        """
         self.answer_text_study.config(state="normal")
         self.answer_text_study.delete("1.0", tk.END)
         self.answer_text_study.config(state="disabled")
-        self.answer_img_label.config(image="", text="")
-        self.answer_img_obj = None
 
+        for child in self.answer_images_frame_study.winfo_children():
+            child.destroy()
+        self.answer_img_objs_study.clear()
+
+    def display_answer_images_study(self, paths):
+        """
+        Display all answer images in a vertical column, centered.
+        Note: We do NOT call clear_answer_display() here,
+        so we don't erase the newly inserted text.
+        """
+        # Clear only old images, not the text
+        for child in self.answer_images_frame_study.winfo_children():
+            child.destroy()
+        self.answer_img_objs_study.clear()
+
+        # Insert new images
+        for p in paths:
+            if os.path.exists(p):
+                try:
+                    img = Image.open(p)
+                    img.thumbnail((400, 400), Resampling.LANCZOS)
+                    img_obj = ImageTk.PhotoImage(img)
+                    self.answer_img_objs_study.append(img_obj)
+                    lbl = tk.Label(self.answer_images_frame_study, image=img_obj, bg="#FFFFFF")
+                    lbl.pack(side="top", anchor="center", pady=5)
+                except:
+                    lbl = tk.Label(self.answer_images_frame_study, text="(Error loading image)", bg="#FFFFFF")
+                    lbl.pack(side="top", anchor="center", pady=5)
+
+    # ================================================================
+    # Utility: CTRL+Backspace in a Text widget
+    # ================================================================
     def ctrl_backspace_handler(self, event):
-        """Implements typical Ctrl+Backspace word deletion in a Text widget."""
         widget = event.widget
         insert_pos = widget.index(tk.INSERT)
         text_before_cursor = widget.get("1.0", insert_pos)
